@@ -5,9 +5,16 @@ Matrix cutover** (`04-cutover-runbook.md`): once Synapse lands here, its signing
 irreplaceable, so we want proven recovery *before* the crown jewel arrives.
 
 > **One-line summary:** the host is a Hetzner Cloud VM with Hetzner's automated whole-VM
-> backups. For a hardware/disk failure that is the entire recovery path — rebuild from the
-> latest backup, fix the IP in DNS, verify. The gaps Hetzner backups *don't* cover are in
-> [§4](#4-what-hetzner-backups-do-not-cover-the-gaps).
+> backups, plus an age-encrypted offsite S3 layer (§5) for per-service recovery. The gaps
+> Hetzner backups *don't* cover are in [§4](#4-what-hetzner-backups-do-not-cover-the-gaps).
+
+### Pick your scenario
+
+| What happened | Go to |
+|---|---|
+| **Whole host lost** — disk/hardware failure, box gone | **Runbook A (§6)** — restore the Hetzner whole-VM snapshot |
+| **Whole host lost, no usable snapshot** — region loss, provider migration | **Runbook B (§7)** — rebuild a fresh box from the offsite S3 bundle |
+| **One service fell over** — crashed, corrupted DB, bad config/upgrade | **Runbook C (§8)** — restart or restore just that service |
 
 ---
 
@@ -24,7 +31,7 @@ irreplaceable, so we want proven recovery *before* the crown jewel arrives.
 | SSH | `reala@www.parodia.dev` (`reala` is sudoer; `/mash` is `mash`-owned 700/750) |
 | Backups | **Hetzner Cloud Backups ENABLED** ✅ (verified 2026-06-28 via API) — daily, window `10-14` UTC, **7 rotating slots full** (oldest `06-22`, freshest `06-28T10:29`); ~161 GB whole-VM images |
 | DNS | **EuroDNS** (`ns1-4.eurodns.com`) — *separate control plane, not on the VM* |
-| Backup-state token | read-only hcloud API token at `/etc/parodia/hcloud-ro.token` (0600) — re-run the §11 check anytime |
+| Backup-state token | read-only hcloud API token at `/etc/parodia/hcloud-ro.token` (0600) — re-run the §12 check anytime |
 
 ## 2. What's running (services to restore, in dependency order)
 
@@ -132,7 +139,7 @@ are installed but no general remote/cron exists.
 - Drop a healthchecks.io URL in `/etc/parodia/backup-snitch.url` → the script then pings
   `start`/success/`/fail` so a *silently stopped* backup alerts (the run is otherwise unwatched).
 - Export the EuroDNS zone and commit it (git-crypt) on change.
-- **Rehearse a real restore with the OFFLINE age identity** (see §7 recipe) — the host cannot
+- **Rehearse a real restore with the OFFLINE age identity** (see the §5 recipe below) — the host cannot
   decrypt its own backups by design, so only the key-holder can prove end-to-end recovery.
 
 ### Restoring from this layer (needs the offline age identity)
@@ -170,15 +177,15 @@ The expected path. RTO ~15–30 min once the image is selected; RPO ≤ 24 h (la
 2. **Restore the backup** (Console → server → *Backups* → pick the latest healthy slot →
    *Restore*, or `hcloud server restore <id> --image <backup-id>`).
    - Restoring **into the same server** keeps the **IP** → no DNS change needed.
-   - If you must build a **new** server from the backup image, it gets a **new IP** → do §7
+   - If you must build a **new** server from the backup image, it gets a **new IP** → do §9
      DNS step. New server must be **≥** the original size.
 3. **Boot & sanity:** SSH in, `docker ps` — Compose services with `restart: unless-stopped`
    come back on boot. Bring up any stopped stack manually (`cd <dir> && docker compose up -d`),
    infra order from §2 (traefik + shared-postgres first).
 4. **Fix the pgdata-ownership gotcha** if Akkoma DB won't start:
    `sudo chown -R 70:70 /mash/akkoma/pgdata && sudo chmod 700 /mash/akkoma/pgdata && docker compose -f /mash/akkoma/docker-compose.yml restart db`.
-5. **DNS** — only if the IP changed (§7).
-6. **Verify** every service (§9).
+5. **DNS** — only if the IP changed (§9).
+6. **Verify** every service (§10).
 
 ## 7. Restore runbook B — rebuild on a fresh box (no usable snapshot)
 
@@ -199,10 +206,80 @@ offsite layer is load-bearing — without it, recovery from this state is **not 
    `config.exs` loginMethod=token, `registrations_open: false`) and rebuild
    (`mix deps.get && mix compile`), since a clean checkout loses tracked-file edits.
 5. **Traefik:** restore `acme.json` (mode 600) or let ACME re-issue (watch LE rate limits).
-6. **DNS** (§7 below) — point everything at the new IP.
-7. **Verify** (§9).
+6. **DNS** (§9 below) — point everything at the new IP.
+7. **Verify** (§10).
 
-## 8. DNS / IP cutover (EuroDNS) — when the IP changes
+## 8. Restore runbook C — a single service fell over
+
+Most incidents are *one* service, not the whole box. Triage by failure type and escalate only
+as far as you need to. The DB/secret restores (C2/C3) pull from the §5 offsite layer and need
+the **offline age identity** — first rebuild the rclone env from the §5 *"Restoring from this
+layer"* snippet, then pick a `<stamp>` with `rclone lsf parodia:$S3_BUCKET/host/ --dirs-only`.
+
+**Service quick reference**
+
+| Service | Container(s) | Compose dir | DB restore target |
+|---|---|---|---|
+| Authentik | `authentik-{server,worker,postgresql,redis}-1` | `/mash/authentik` | `authentik-postgresql-1` · `-U authentik -d authentik` |
+| Akkoma | `akkoma-akkoma-1`, `akkoma-db-1` | `/mash/akkoma` | `akkoma-db-1` · `-U akkoma -d akkoma` |
+| Lemmy | `lemmy-{lemmy,lemmy-ui,postgres,pictrs,lemmy-nginx}-1` | `/mash/lemmy` | `lemmy-postgres-1` · `-U lemmy -d lemmy` |
+| Gitea | `gitea` | `/opt/gitea` | `shared-postgres` · `-U root -d gitea` |
+| Miniflux | `miniflux` | `/opt/miniflux` | `shared-postgres` · `-U root -d miniflux` |
+| WriteFreely | `writefreely` | `/opt/writefreely` | data in `mash-writefreely-data` vol (Hetzner snapshot only) |
+| traefik / exim / uptime-kuma | as named | `/mash/traefik`, `/opt/exim-relay`, `/opt/uptime-kuma` | — (stateless or Hetzner only) |
+
+> `/mash/*` dirs are `700 mash` — prefix compose commands there with `sudo`.
+
+### C1 — Container down / crashed, data intact → restart (try this first)
+
+```bash
+docker ps -a --filter name=<svc>            # Exited / Restarting?
+docker logs --tail=100 <container>          # why it died
+cd <compose-dir> && docker compose up -d    # bring the stack back
+docker compose restart <svc>                # or just bounce one service
+```
+- **Akkoma DB won't start** after any host-level `chown`: pgdata must be uid 70 →
+  `sudo chown -R 70:70 /mash/akkoma/pgdata && sudo chmod 700 /mash/akkoma/pgdata && sudo docker compose -f /mash/akkoma/docker-compose.yml restart db`.
+- **Akkoma app** runs from source, so a restart recompiles; if a bad `git reset` broke it,
+  re-apply the tracked-file patches (`endpoint.ex` RewriteOn, `config.exs` loginMethod) first.
+- **Bad auto-update?** Watchtower auto-pulls `latest`. Roll back by pinning the previous image
+  tag in the compose file, then `docker compose up -d`.
+
+### C2 — DB corrupted / bad migration / accidental delete → restore just that DB
+
+Restore the one service's database from a chosen offsite dump. **Stop the app first** so nothing
+writes mid-restore; `--clean --if-exists` drops & recreates objects in place.
+
+```bash
+# Authentik example — quiesce app, restore DB, bring it back:
+cd /mash/authentik && sudo docker compose stop server worker
+rclone cat parodia:$S3_BUCKET/host/<stamp>/authentik.sql.age \
+  | age -d -i /path/to/offline-identity.txt \
+  | docker exec -i authentik-postgresql-1 pg_restore -U authentik -d authentik --clean --if-exists
+sudo docker compose start server worker
+```
+Same pattern per service (stop app → restore object → start app):
+- **Lemmy** — `lemmy.sql.age` → `docker exec -i lemmy-postgres-1 pg_restore -U lemmy -d lemmy --clean --if-exists` (stop `lemmy lemmy-ui`)
+- **Akkoma** — `akkoma.sql.age` → `docker exec -i akkoma-db-1 pg_restore -U akkoma -d akkoma --clean --if-exists` (stop `akkoma`)
+- **Gitea** — `shared-gitea.sql.age` → `docker exec -i shared-postgres pg_restore -U root -d gitea --clean --if-exists` (stop `gitea`)
+- **Miniflux** — `shared-miniflux.sql.age` → `docker exec -i shared-postgres pg_restore -U root -d miniflux --clean --if-exists` (stop `miniflux`)
+
+### C3 — Lost / garbled config or secret → restore from the secrets bundle
+
+Pull just the affected path out of the encrypted tarball (it stores absolute paths, so `-P`):
+
+```bash
+# list contents first (-t), then extract the specific path (-x):
+rclone cat parodia:$S3_BUCKET/host/<stamp>/secrets.tar.gz.age | age -d -i /path/to/offline-identity.txt | tar tzf - -P | less
+rclone cat parodia:$S3_BUCKET/host/<stamp>/secrets.tar.gz.age | age -d -i /path/to/offline-identity.txt | sudo tar xzf - -P  <path/to/restore>
+```
+- Authentik **blueprints** re-apply when `authentik-worker-1` (re)starts.
+- **Re-fix ownership** after extracting into `/mash`: tree → `mash:mash`; `/mash/akkoma` →
+  `1000:1000` *then* `pgdata` → `70:70`; Authentik `data/media/public` → `1000:1000`.
+
+After any C-path fix, run the relevant rows of the §10 checklist for that service.
+
+## 9. DNS / IP cutover (EuroDNS) — when the IP changes
 
 Records are at **EuroDNS**, not on the box. Whenever the restore yields a new IP:
 
@@ -214,7 +291,7 @@ Records are at **EuroDNS**, not on the box. Whenever the restore yields a new IP
 - Note (today): apex + `matrix` still point at **etke** (`46.225.142.216`) until the Matrix
   cutover; everything else already points at this box.
 
-## 9. Post-restore verification checklist
+## 10. Post-restore verification checklist
 
 - [ ] `docker ps` — all expected containers `Up`/healthy (compare to §2)
 - [ ] **Traefik** serving valid TLS (not the default self-signed) on the app hosts
@@ -231,11 +308,11 @@ Records are at **EuroDNS**, not on the box. Whenever the restore yields a new IP
       (`/_matrix/key/v2/server`); existing user logs in **without** re-auth;
       federation send + receive both work
 
-## 10. Pre-cutover DR readiness gate (do before Matrix lands)
+## 11. Pre-cutover DR readiness gate (do before Matrix lands)
 
 The point of this doc. Don't bring Synapse over until:
 
-- [x] Hetzner Backups confirmed **enabled**, freshest slot < 24 h old — verified 2026-06-28 (§11)
+- [x] Hetzner Backups confirmed **enabled**, freshest slot < 24 h old — verified 2026-06-28 (§12)
 - [~] §5 offsite layer **built + running** (daily timer; all 6 objects upload, age-encrypt, and
       `pg_restore -l`-validate). **Remaining:** one real decrypt→restore with the offline age
       identity — an untested *restore* is still a hope, not a backup
@@ -245,7 +322,7 @@ The point of this doc. Don't bring Synapse over until:
 - [ ] age backup **identity** (private key — shared with the Ditto engine) stored offline in
       ≥2 places; losing it makes every encrypted S3 backup unrecoverable by design
 
-## 11. Verify Hetzner backup state (re-runnable)
+## 12. Verify Hetzner backup state (re-runnable)
 
 A read-only hcloud API token lives at `/etc/parodia/hcloud-ro.token` (0600 `reala`, sourced
 from Ditto's `[observability].hetzner_token`). Confirm backups are still running and fresh —
