@@ -16,6 +16,35 @@ irreplaceable, so we want proven recovery *before* the crown jewel arrives.
 | **Whole host lost, no usable snapshot** — region loss, provider migration | **Runbook B (§7)** — rebuild a fresh box from the offsite S3 bundle |
 | **One service fell over** — crashed, corrupted DB, bad config/upgrade | **Runbook C (§8)** — restart or restore just that service |
 
+### The fast path — `scripts/parodia-restore.py`
+
+Most of the runbooks below are now driven by one interactive tool so you don't
+hand-assemble the `rclone | age | pg_restore` pipelines under pressure:
+
+```bash
+# clone this repo from GitHub (it is off-host on purpose — §4), then:
+sudo ./scripts/parodia-restore.py --identity /path/to/offline-age.key
+```
+
+It auto-loads `/etc/parodia/s3-backup.env`, discovers the backup stamps in S3,
+shows each one's MANIFEST, and presents a menu:
+
+1. **List / inspect** offsite backups
+2. **Restore one service DB** (Runbook C2) — quiesces the app, streams the chosen
+   dump through `age -d` into `pg_restore --clean --if-exists`, restarts the app
+   (and re-chowns Akkoma's pgdata to uid 70 automatically)
+3. **Restore one config/secret path** (Runbook C3) — lists the encrypted bundle,
+   extracts a single path (or all) in place
+4. **View Hetzner whole-VM backups** (Runbook A — situational awareness)
+5. **Rebuild the whole server** from a Hetzner backup (Runbook A — destructive;
+   needs a *write* token + you type the server name to confirm)
+
+It's pure `python3` stdlib and shells out to the already-installed `rclone` /
+`age` / `docker`, so it runs on a fresh disaster box with no `pip install`. The
+**offline age identity is required** for any decrypt (option 2/3) and never lives
+on the host. The sections below are the narrative + the exact commands the tool
+runs, for when you need to work by hand or understand what it's doing.
+
 ---
 
 ## 1. The box (confirmed 2026-06-28)
@@ -213,8 +242,13 @@ offsite layer is load-bearing — without it, recovery from this state is **not 
 
 Most incidents are *one* service, not the whole box. Triage by failure type and escalate only
 as far as you need to. The DB/secret restores (C2/C3) pull from the §5 offsite layer and need
-the **offline age identity** — first rebuild the rclone env from the §5 *"Restoring from this
-layer"* snippet, then pick a `<stamp>` with `rclone lsf parodia:$S3_BUCKET/host/ --dirs-only`.
+the **offline age identity**.
+
+> **Fast path:** `sudo ./scripts/parodia-restore.py --identity <key>` does C2 and C3 for you
+> (menu options 2 and 3) — it discovers the stamps, quiesces the app, runs the pipeline, and
+> restarts. The commands below are what it runs; use them to work by hand. To do it manually,
+> first rebuild the rclone env from the §5 *"Restoring from this layer"* snippet, then pick a
+> `<stamp>` with `rclone lsf parodia:$S3_BUCKET/host/ --dirs-only`.
 
 **Service quick reference**
 

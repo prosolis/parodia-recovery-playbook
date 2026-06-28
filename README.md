@@ -49,6 +49,7 @@ docs/
   06-restoration-playbook.md whole-host disaster-recovery / restoration runbook
 compose/                     the hand-rolled Synapse + Postgres + well-known stack
 scripts/recon-etke.sh        etke.cc recon helper
+scripts/parodia-restore.py   interactive DR driver for docs/06 (restore services / rebuild VM)
 ```
 
 ## Status
