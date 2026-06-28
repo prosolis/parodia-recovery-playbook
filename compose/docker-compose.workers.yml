@@ -7,10 +7,19 @@
 
 name: matrix
 
+# Anchors don't cross compose files, so redeclare the shared logging policy here.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    logging: *logging
+    mem_limit: 256m
     command: ["redis-server", "--save", "", "--appendonly", "no"]   # ephemeral pub/sub bus
     networks: [internal]
     healthcheck:
@@ -20,6 +29,7 @@ services:
       retries: 5
 
   # Stop exposing the monolith directly; the nginx router fronts everything in worker mode.
+  # (mem_limit/logging inherited from the base docker-compose.yml synapse service.)
   synapse:
     labels:
       - "traefik.enable=false"
@@ -33,6 +43,8 @@ services:
   nginx-router:
     image: nginx:alpine
     restart: unless-stopped
+    logging: *logging
+    mem_limit: 64m
     depends_on: [synapse]
     volumes:
       - ./synapse/worker-router.conf:/etc/nginx/conf.d/default.conf:ro
@@ -49,6 +61,9 @@ services:
   sync1: &worker
     image: ghcr.io/element-hq/synapse:latest
     restart: unless-stopped
+    logging: *logging
+    # Safety ceiling per generic worker. Sync/fed workers are the heavier ones.
+    mem_limit: 768m
     depends_on:
       postgres:
         condition: service_healthy
@@ -75,8 +90,10 @@ services:
 
   mediaworker:
     <<: *worker
+    mem_limit: 512m            # lighter than sync/fed workers
     command: ["--config-path", "/data/homeserver.yaml", "--config-path", "/data/workers/mediaworker.yaml"]
 
   bg:
     <<: *worker
+    mem_limit: 512m            # background tasks / pushers — light
     command: ["--config-path", "/data/homeserver.yaml", "--config-path", "/data/workers/bg.yaml"]

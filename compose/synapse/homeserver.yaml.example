@@ -35,10 +35,28 @@ registration_shared_secret: "REPLACE_FROM_ETKE"
 # ----------------------------------------------------------------------------
 
 media_store_path: "/data/media-store"
-max_upload_size: "50M"               # match/raise to etke's value if it differed
+max_upload_size: "1024M"             # matches etke (confirmed 2026-06-28)
+enable_authenticated_media: true     # MSC3916 — etke had it on; keep on (current Synapse default)
+
+default_room_version: "12"           # matches etke; needs current Synapse (latest is fine)
 
 enable_registration: false           # closed; we move to MAS+Authentik for signup later
 report_stats: false
+
+# --- TURN / VoIP (coturn) ---------------------------------------------------
+# The shared secret MUST equal coturn's static-auth-secret (compose injects it from
+# ${TURN_SHARED_SECRET}). Synapse does NOT expand env in YAML — paste the literal
+# secret here (this file is gitignored; the .example carries the placeholder).
+turn_uris:
+  - "turn:matrix.parodia.dev?transport=udp"
+  - "turn:matrix.parodia.dev?transport=tcp"
+  # Add the turns: (TLS) URIs once coturn has the matrix.parodia.dev cert wired:
+  # - "turns:matrix.parodia.dev?transport=udp"
+  # - "turns:matrix.parodia.dev?transport=tcp"
+turn_shared_secret: "REPLACE_FROM_ENV"   # = TURN_SHARED_SECRET (fresh; not etke's)
+turn_user_lifetime: 86400000
+turn_allow_guests: false
+# ----------------------------------------------------------------------------
 
 trusted_key_servers:
   - server_name: "matrix.org"

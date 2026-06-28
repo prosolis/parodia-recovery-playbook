@@ -20,9 +20,11 @@ on the managed host. Two routes:
 ## 1. Signing key (most important)
 
 ```bash
-# on the etke host
-cat /matrix/synapse/config/homeserver.signing.key
-# → copy verbatim to the new host as the same filename. One line. Guard it like a secret.
+# on the etke host — the actual filename is server-name-prefixed:
+cat /matrix/synapse/config/matrix.parodia.dev.signing.key
+# → copy verbatim to the new host. One line (59 bytes). Guard it like a secret.
+#   Our homeserver.yaml sets signing_key_path: /data/homeserver.signing.key, so save it as
+#   compose/synapse/homeserver.signing.key (renaming is fine — content is the identity).
 ```
 
 Also capture these secrets from `/matrix/synapse/config/homeserver.yaml` and keep them
@@ -32,11 +34,14 @@ Also capture these secrets from `/matrix/synapse/config/homeserver.yaml` and kee
 ## 2. Postgres dump
 
 ```bash
-# Find the synapse DB container/creds (etke: matrix-postgres)
+# etke creds (confirmed 2026-06-28): container matrix-postgres, user+db both `synapse`.
 docker exec matrix-postgres pg_dump -U synapse -Fc synapse > synapse.dump
-# -Fc = custom format (compressed, restorable with pg_restore). Note the PG major version:
-docker exec matrix-postgres postgres --version
+# -Fc = custom format (compressed, restorable with pg_restore).
+docker exec matrix-postgres postgres --version   # confirmed: PostgreSQL 18.4
 ```
+
+> **PG 18 → target must be PG ≥ 18.** The new stack pins `postgres:18-alpine`. Do NOT
+> restore this dump into 17/16 — `pg_restore` refuses a downgrade. DB is ~2.9 G (fast).
 
 ## 3. Media store
 
@@ -51,8 +56,18 @@ rsync -aHAX --info=progress2 \
 
 ```bash
 ls /matrix/*/registration.yaml /matrix/synapse/config/*registration*.yaml 2>/dev/null
-# Draupnir at minimum. Copy each; they pin the as_token/hs_token bots authenticate with.
+# Confirmed 2026-06-28: the ONLY registration is /matrix/appservice-double-puppet/config/
+# registration.yaml — a vestigial mautrix helper (no bridges deployed). Draupnir runs as a
+# normal bot USER (@draupnir:parodia.dev), not an appservice. Both are deferred/dropped for
+# the core move; copy the file only if you later re-add mautrix bridges with double-puppeting.
 ```
+
+## 4b. coturn / TURN secret (calls are in the core stack)
+
+Do **not** carry etke's `turn_shared_secret` — generate a fresh one (`openssl rand -hex 32`)
+and put the SAME value in both `compose/.env` (`TURN_SHARED_SECRET`) and Synapse's
+`turn_shared_secret`. coturn realm/ports we re-author (realm `parodia.dev`, relay
+49152–49252); `external-ip` becomes the new box `178.104.56.222`.
 
 ## 5. Config reference (rebuild, don't copy wholesale)
 

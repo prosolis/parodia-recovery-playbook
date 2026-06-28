@@ -1,0 +1,19 @@
+{
+  "default_server_config": {
+    "m.homeserver": {
+      "base_url": "https://matrix.parodia.dev",
+      "server_name": "parodia.dev"
+    }
+  },
+  "brand": "Parodia",
+  "disable_custom_urls": false,
+  "disable_guests": true,
+  "default_country_code": "US",
+  "show_labs_settings": true,
+  "room_directory": {
+    "servers": ["parodia.dev", "matrix.org"]
+  },
+  "setting_defaults": {
+    "use_system_theme": false
+  }
+}

@@ -1,6 +1,7 @@
 # Self-hosted Matrix (Synapse) for parodia.dev — hand-rolled, no Ansible.
-# server_name = parodia.dev (preserved). Current images: latest Synapse is >= etke's
-# by definition; Postgres 16/17 both restore an older dump fine via pg_restore.
+# server_name = parodia.dev (preserved). Synapse `latest` is >= etke's v1.155.0 by
+# definition. Postgres MUST be >= the source major: etke runs PG 18, so we pin 18
+# (you cannot pg_restore an 18 dump into 17/16 — that's a downgrade).
 #
 # Proxy: pluggable. The Traefik labels below ride the existing mash-traefik. To swap
 # proxies later, edit ONLY the labels + the `proxy` network here — nothing else moves.
@@ -13,17 +14,30 @@
 
 name: matrix
 
+# Shared logging policy (anchor). x-* keys are ignored by Compose except as anchor
+# sources. Caps each container's json log at 3x10M so Synapse + workers can't fill
+# the disk (the daemon has no global log rotation set).
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   postgres:
-    image: postgres:17-alpine
+    image: postgres:18-alpine          # MUST be >= etke's PG 18 (logical restore can't downgrade)
     restart: unless-stopped
+    logging: *logging
+    # Safety ceiling — never OOM the DB. Sits above shared_buffers(1G) + autovacuum
+    # (maintenance_work_mem 256M x 3 workers) + per-connection work_mem headroom.
+    mem_limit: 3g
     environment:
       POSTGRES_DB: synapse
       POSTGRES_USER: synapse
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
       # Synapse REQUIRES C collation; set at initdb time (only applies to a fresh volume).
       POSTGRES_INITDB_ARGS: "--encoding=UTF8 --lc-collate=C --lc-ctype=C"
-    # Tuned for this box (12 cores / ~12G free / no swap) and for workers' connection load.
+    # Tuned for this box (12 cores / 24G, swap present) and for workers' connection load.
     # max_connections covers main + ~6 workers each with their own pool, with headroom.
     command:
       - "postgres"
@@ -51,6 +65,10 @@ services:
   synapse:
     image: ghcr.io/element-hq/synapse:latest
     restart: unless-stopped
+    logging: *logging
+    # Safety ceiling. With caches.cache_autotuning (target 768M / max 1G) Synapse
+    # self-evicts well under this; 2g only stops a true runaway (e.g. a big backfill).
+    mem_limit: 2g
     depends_on:
       postgres:
         condition: service_healthy
@@ -70,12 +88,55 @@ services:
       - "traefik.http.routers.matrix.tls.certResolver=${CERT_RESOLVER}"
       - "traefik.http.services.matrix.loadbalancer.server.port=8008"
 
+  # Element Web client at element.parodia.dev (matches the hostname etke served it on).
+  element:
+    image: vectorim/element-web:latest
+    restart: unless-stopped
+    logging: *logging
+    mem_limit: 128m
+    volumes:
+      - ./element/config.json:/app/config.json:ro
+    networks: [proxy]
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=${PROXY_NETWORK}"
+      - "traefik.http.routers.element.rule=Host(`element.parodia.dev`)"
+      - "traefik.http.routers.element.entrypoints=web-secure"
+      - "traefik.http.routers.element.tls=true"
+      - "traefik.http.routers.element.tls.certResolver=${CERT_RESOLVER}"
+      - "traefik.http.services.element.loadbalancer.server.port=80"
+
+  # coturn — TURN relay for Matrix voice/video (1:1 + group calls).
+  # Uses host networking: it needs the real public IP and the 49152-49252 relay
+  # range (publishing 100 UDP ports via the bridge is impractical). It does NOT ride
+  # Traefik — clients reach it directly on 3478/5349. Synapse and coturn only share
+  # the static-auth-secret (no direct link). Open 3478/5349 (tcp+udp) + 49152-49252/udp
+  # in the host firewall. TLS (turns:5349) needs the matrix.parodia.dev cert dumped
+  # from Traefik — see compose/coturn/turnserver.conf (left as a TODO; turn:3478 works now).
+  coturn:
+    image: coturn/coturn:4.9-alpine        # mirror etke's 4.9.x — verify tag with `docker compose pull` on the box
+    restart: unless-stopped
+    logging: *logging
+    mem_limit: 256m
+    network_mode: host
+    volumes:
+      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+    command:
+      - "-c"
+      - "/etc/coturn/turnserver.conf"
+      # Secrets/host-specifics injected here so they stay out of the tracked conf file.
+      - "--static-auth-secret=${TURN_SHARED_SECRET:?set in .env}"
+      - "--external-ip=${TURN_EXTERNAL_IP:?set in .env}"
+      - "--realm=${TURN_REALM:-parodia.dev}"
+
   # Static .well-known delegation served at parodia.dev/.well-known/matrix/*
   # (Only needed if the apex isn't already serving these. If mash already serves
   #  parodia.dev, point its well-known at these files instead and drop this service.)
   well-known:
     image: nginx:alpine
     restart: unless-stopped
+    logging: *logging
+    mem_limit: 64m
     volumes:
       - ./well-known/nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ./well-known:/usr/share/nginx/html/.well-known/matrix:ro
