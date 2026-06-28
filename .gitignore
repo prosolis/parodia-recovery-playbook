@@ -5,3 +5,5 @@ compose/data/
 
 # Synapse config carries live secrets once filled (password + the 3 etke secrets)
 compose/synapse/homeserver.yaml
+__pycache__/
+*.pyc
