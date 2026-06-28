@@ -1,0 +1,9 @@
+worker_app: synapse.app.generic_worker
+worker_name: sync1
+worker_listeners:
+  - type: http
+    port: 8008
+    x_forwarded: true
+    resources:
+      - names: [client]
+worker_log_config: /data/log.config

@@ -1,0 +1,82 @@
+# Phase 2 overlay — converts the monolith into a workered deployment.
+# Apply ONLY after the monolith cutover is verified green (see docs/05-workers.md):
+#   1) uncomment the WORKERS block in synapse/homeserver.yaml (redis, instance_map,
+#      offload flags, and the :9093 replication listener)
+#   2) docker compose -f docker-compose.yml -f docker-compose.workers.yml up -d
+# Reversible: stop these services + drop synapse's `traefik.enable=false` to roll back to monolith.
+
+name: matrix
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]   # ephemeral pub/sub bus
+    networks: [internal]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Stop exposing the monolith directly; the nginx router fronts everything in worker mode.
+  synapse:
+    labels:
+      - "traefik.enable=false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # Synapse-aware path router. Traefik -> nginx-router -> workers / main.
+  nginx-router:
+    image: nginx:alpine
+    restart: unless-stopped
+    depends_on: [synapse]
+    volumes:
+      - ./synapse/worker-router.conf:/etc/nginx/conf.d/default.conf:ro
+    networks: [internal, proxy]
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=${PROXY_NETWORK}"
+      - "traefik.http.routers.matrix.rule=Host(`matrix.parodia.dev`)"
+      - "traefik.http.routers.matrix.entrypoints=web-secure"
+      - "traefik.http.routers.matrix.tls=true"
+      - "traefik.http.routers.matrix.tls.certResolver=${CERT_RESOLVER}"
+      - "traefik.http.services.matrix.loadbalancer.server.port=80"
+
+  sync1: &worker
+    image: ghcr.io/element-hq/synapse:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    entrypoint: ["python", "-m", "synapse.app.generic_worker"]
+    command: ["--config-path", "/data/homeserver.yaml", "--config-path", "/data/workers/sync1.yaml"]
+    volumes:
+      - ./synapse:/data
+      - ./data/media-store:/data/media-store
+    networks: [internal]
+
+  sync2:
+    <<: *worker
+    command: ["--config-path", "/data/homeserver.yaml", "--config-path", "/data/workers/sync2.yaml"]
+
+  fedreader:
+    <<: *worker
+    command: ["--config-path", "/data/homeserver.yaml", "--config-path", "/data/workers/fedreader.yaml"]
+
+  fedsender:
+    <<: *worker
+    command: ["--config-path", "/data/homeserver.yaml", "--config-path", "/data/workers/fedsender.yaml"]
+
+  mediaworker:
+    <<: *worker
+    command: ["--config-path", "/data/homeserver.yaml", "--config-path", "/data/workers/mediaworker.yaml"]
+
+  bg:
+    <<: *worker
+    command: ["--config-path", "/data/homeserver.yaml", "--config-path", "/data/workers/bg.yaml"]

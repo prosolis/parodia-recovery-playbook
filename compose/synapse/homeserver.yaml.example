@@ -1,0 +1,78 @@
+# Synapse config for parodia.dev — authored clean (NOT copied from etke).
+# Copy across from etke ONLY: the signing key file + the three secrets marked below.
+# Full reference: https://element-hq.github.io/synapse/latest/usage/configuration/config_documentation.html
+
+server_name: "parodia.dev"            # NEVER change — this is the federation identity
+public_baseurl: "https://matrix.parodia.dev/"
+pid_file: /data/homeserver.pid
+signing_key_path: "/data/homeserver.signing.key"   # <-- copy this FILE verbatim from etke
+
+listeners:
+  - port: 8008
+    tls: false
+    type: http
+    x_forwarded: true                 # behind Traefik; trust X-Forwarded-*
+    bind_addresses: ['0.0.0.0']
+    resources:
+      - names: [client, federation]   # 443-only: federation served on the same listener
+        compress: false
+
+database:
+  name: psycopg2
+  args:
+    user: synapse
+    password: "${POSTGRES_PASSWORD}"  # Synapse doesn't expand env by default — see note below
+    dbname: synapse
+    host: postgres
+    cp_min: 5
+    cp_max: 10
+
+# --- Secrets: copy these THREE values verbatim from etke's homeserver.yaml ---
+# Keeping them identical means existing access tokens & login sessions survive the move.
+macaroon_secret_key: "REPLACE_FROM_ETKE"
+form_secret: "REPLACE_FROM_ETKE"
+registration_shared_secret: "REPLACE_FROM_ETKE"
+# ----------------------------------------------------------------------------
+
+media_store_path: "/data/media-store"
+max_upload_size: "50M"               # match/raise to etke's value if it differed
+
+enable_registration: false           # closed; we move to MAS+Authentik for signup later
+report_stats: false
+
+trusted_key_servers:
+  - server_name: "matrix.org"
+
+log_config: "/data/log.config"
+
+## ============================================================================
+## WORKERS (Phase 2) — uncomment this whole block when applying
+## docker-compose.workers.yml. Keep commented for the monolith cutover. See docs/05.
+## ----------------------------------------------------------------------------
+#redis:
+#  enabled: true
+#  host: redis
+#instance_map:
+#  main:
+#    host: synapse
+#    port: 9093
+#send_federation: false
+#federation_sender_instances: [fedsender]
+#start_pushers: false
+#pusher_instances: [bg]
+#notify_appservices_from_worker: bg
+#run_background_tasks_on: bg
+#media_instance_running_background_jobs: mediaworker
+#
+## ALSO add this replication listener to the `listeners:` list near the top:
+#  - port: 9093
+#    type: http
+#    bind_addresses: ['0.0.0.0']
+#    resources:
+#      - names: [replication]
+## ============================================================================
+
+# NOTE on ${POSTGRES_PASSWORD}: Synapse does not expand env vars in YAML by itself.
+# Either (a) hardcode the password here (file is gitignored + chmod 600), or
+# (b) run with `SYNAPSE_CONFIG_DIR` + envsubst at boot. Simplest: paste the literal
+# password here and keep this file out of git (it already is via compose/.gitignore).

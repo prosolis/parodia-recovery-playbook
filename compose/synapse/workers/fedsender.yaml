@@ -1,0 +1,5 @@
+worker_app: synapse.app.generic_worker
+worker_name: fedsender
+# Outbound federation only — driven by `federation_sender_instances: [fedsender]` in
+# homeserver.yaml. No inbound HTTP listener needed.
+worker_log_config: /data/log.config

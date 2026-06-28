@@ -1,0 +1,8 @@
+worker_app: synapse.app.generic_worker
+worker_name: bg
+# Background tasks + pushers + appservice notifications. Driven by these in homeserver.yaml:
+#   run_background_tasks_on: bg
+#   pusher_instances: [bg]
+#   notify_appservices_from_worker: bg
+# No inbound HTTP listener needed.
+worker_log_config: /data/log.config

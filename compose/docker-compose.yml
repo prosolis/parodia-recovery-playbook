@@ -1,0 +1,97 @@
+# Self-hosted Matrix (Synapse) for parodia.dev — hand-rolled, no Ansible.
+# server_name = parodia.dev (preserved). Current images: latest Synapse is >= etke's
+# by definition; Postgres 16/17 both restore an older dump fine via pg_restore.
+#
+# Proxy: pluggable. The Traefik labels below ride the existing mash-traefik. To swap
+# proxies later, edit ONLY the labels + the `proxy` network here — nothing else moves.
+#
+# Bring-up order for the real migration (see docs/04-cutover-runbook.md):
+#   1) docker compose up -d postgres          # clean DB, C collation
+#   2) pg_restore the etke dump into it       # scripts/import-from-etke.sh
+#   3) drop signing key + secrets into place  # BEFORE synapse first boot
+#   4) docker compose up -d synapse           # migrates imported schema forward
+
+name: matrix
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: synapse
+      POSTGRES_USER: synapse
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      # Synapse REQUIRES C collation; set at initdb time (only applies to a fresh volume).
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --lc-collate=C --lc-ctype=C"
+    # Tuned for this box (12 cores / ~12G free / no swap) and for workers' connection load.
+    # max_connections covers main + ~6 workers each with their own pool, with headroom.
+    command:
+      - "postgres"
+      - "-c"
+      - "max_connections=150"
+      - "-c"
+      - "shared_buffers=1GB"
+      - "-c"
+      - "effective_cache_size=3GB"
+      - "-c"
+      - "work_mem=8MB"
+      - "-c"
+      - "maintenance_work_mem=256MB"
+      - "-c"
+      - "random_page_cost=1.1"      # SSD
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U synapse -d synapse"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  synapse:
+    image: ghcr.io/element-hq/synapse:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SYNAPSE_CONFIG_PATH: /data/homeserver.yaml
+    volumes:
+      - ./synapse:/data                      # homeserver.yaml, signing key, log config
+      - ./data/media-store:/data/media-store # rsync'd from etke
+    networks: [internal, proxy]
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=${PROXY_NETWORK}"
+      # Client + federation API, both on 443 (443-only federation via well-known).
+      - "traefik.http.routers.matrix.rule=Host(`matrix.parodia.dev`)"
+      - "traefik.http.routers.matrix.entrypoints=web-secure"
+      - "traefik.http.routers.matrix.tls=true"
+      - "traefik.http.routers.matrix.tls.certResolver=${CERT_RESOLVER}"
+      - "traefik.http.services.matrix.loadbalancer.server.port=8008"
+
+  # Static .well-known delegation served at parodia.dev/.well-known/matrix/*
+  # (Only needed if the apex isn't already serving these. If mash already serves
+  #  parodia.dev, point its well-known at these files instead and drop this service.)
+  well-known:
+    image: nginx:alpine
+    restart: unless-stopped
+    volumes:
+      - ./well-known/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./well-known:/usr/share/nginx/html/.well-known/matrix:ro
+    networks: [proxy]
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=${PROXY_NETWORK}"
+      - "traefik.http.routers.mxwk.rule=Host(`parodia.dev`) && PathPrefix(`/.well-known/matrix`)"
+      - "traefik.http.routers.mxwk.entrypoints=web-secure"
+      - "traefik.http.routers.mxwk.tls=true"
+      - "traefik.http.routers.mxwk.tls.certResolver=${CERT_RESOLVER}"
+      - "traefik.http.services.mxwk.loadbalancer.server.port=80"
+
+networks:
+  internal:
+    driver: bridge
+  proxy:
+    external: true
+    name: ${PROXY_NETWORK}
